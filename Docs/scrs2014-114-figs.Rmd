@@ -1,0 +1,825 @@
+---
+title: "Mediterranean Swordfish"
+author: "Laurence Kell"
+date: "21/07/2014"
+output: word_document
+---
+
+Dropbox/swo-med/analysis/tex
+
+```{r, echo=FALSE}
+library(knitr)
+
+opts_chunk$set(comment=NA, 
+               fig.width =5.5, 
+               fig.height=6,
+               fig.path  ="../tex/",
+               warning=FALSE, 
+               message=FALSE, 
+               error  =FALSE, 
+               echo   =FALSE, 
+               eval   =TRUE,
+               cache  =TRUE)
+```
+
+```{r, echo=FALSE}
+library(FLCore)
+library(FLBRP)
+library(ggplotFL)
+library(mixdist)
+library(ALKr)
+library(FLsz)
+library(FLXSA)
+library(FLash)
+library(mixdist)
+
+
+theme_set(theme_bw(base_size=10))
+
+## Functions
+vonB=function(params,data){
+  res=params["linf"]%*%(1.0-exp((-params["k"])%*%(data%-%params["t0"])))
+  dimnames(res)=dimnames(data)
+  res}
+
+## Data and parameters
+dirMy ="/home/laurie/Desktop/Dropbox/swo-med/analysis"
+dirDat=paste(dirMy,"/Data",  sep="")
+dirInp=paste(dirMy,"/Inputs",sep="")
+
+par=FLPar(linf=238.59,k=0.185,t0=-1.404,a=8.90493e-7,b=3.554738,l50=142)
+
+cas=read.csv(paste(dirInp,"casSWOM8513_v1.csv",sep="/"))
+
+names(cas)=c("stock","year","flag","fleet","gear","sea","len","len5","n")
+cas       =transform(cas, len    =len+0.5,
+                     lustrum=(year%/%5)*5,
+                     yr     =year-(year%/%5)*5,
+                     wt     =par["a"]*(len^par["b"])/1000)
+
+pi    =ageIt(cas$len,cas$n,par,timing=0.5,plusGroup=10)
+grwPar=mixparam(pi    =pi[,2]/sum(pi[,2]),
+                mu    =c(vonB(par,FLQuant(0:10+.5,dimnames=list(ages=0:10)))),
+                sigma =rep(0.05,11))
+grwPar$sigma<-grwPar$sigma*grwPar$mu
+
+constr<-mixconstr(conmu ="MFX", 
+                  fixmu=c(rep(FALSE,5),rep(TRUE,6)), 
+                  #consigma ="CCV")
+                  consigma ="SFX", 
+                  fixsigma=c(rep(FALSE,3),rep(TRUE,8)))
+
+```{r,echo=FALSE,cache=TRUE}     
+#par(mfrow=c(6,5))
+#par(mar=c(1,1,1,1))
+
+lfs=dlply(cas,.(year), 
+      function(x,constr,grwPar){
+            
+        dat=ddply(x,.(len), with, data.frame(freq=sum(n)))
+        dat$len[dat$len==max(dat$len)]=Inf  
+            
+        res=mix(dat,grwPar,"norm",constr=constr,emsteps=3,print.level=0,steptol=1e-3)
+        
+        #plot(res)
+        
+        res},
+        constr=constr,grwPar=grwPar)
+save(lfs,constr,grwPar,file=paste(dirDat,"/lfs.RData",sep=""))
+
+## catch, length and weight-at-age matrices
+lcaa=ldply(as.list(lfs), 
+      function(lf){
+        
+          lenFn=function(lf){
+            dat=lf$mixdata
+            apply(sweep(fitted(lf)$joint[-dim(dat)[1],],1,dat[-dim(dat)[1],"len"],"*"),2,sum)/
+            apply(fitted(lf)$joint[-dim(dat)[1],],2,sum)}
+          
+          data.frame(age   =0:10,
+                     length=lenFn(lf),
+                     freq  =apply(fitted(lf)[[2]],2,sum))
+        })
+save(lcaa,file=paste(dirDat,"/mixdist.RData",sep=""))
+
+names(lcaa)   =c("year","age","len","n")
+names(lcaa)[4]="data"
+caa           =as.FLQuant(lcaa[,-3])
+
+names(lcaa)[3]="data"
+laa           =as.FLQuant(lcaa[,-4])
+waa           =par["a"]*laa^par["b"]
+save(caa,laa,waa,par,file=paste(dirDat,"/caa.RData",sep=""))
+```
+
+```{rcas2caa,echo=FALSE, figure.width=12,figure.height=8}     
+lfs.df=ldply(lfs, function(lf){
+
+  fn =function(pi,mu,sigma,x) pi*dnorm(x,mu,sigma)
+  fn2=function(x,lf,binwidth) {
+    lp =lf$parameters
+    pop=sum(lf$mixdata[,2])*binwidth
+    res=mdply(lp,fn,x=x)*pop
+      
+    return(res)}
+  
+  modes<-fn2(lf$mixdata[,1],lf,binwidth=1)
+
+  data.frame(expand.grid(age     =as.numeric(dimnames(lf$parameters)[[1]])-1,
+                         length=lf$mixdata$len),
+                         freq  =melt(modes[,-(1:3)])[,2])})
+
+ggplot(cas) +
+  geom_histogram(aes(len,weight=n/5),
+                 col="lightgreen", fill="white",border="green", binwidth=5) +
+  geom_line(aes(length,freq,group=age),
+                 col="red",data=lfs.df)+
+  geom_line(aes(length,V1),
+                 col="darkgreen",
+                 data=ddply(lfs.df,.(length,year), with, sum(freq))) +
+  facet_wrap(~year)+xlab("Length (cm)")+ylab("Numbers")+
+  theme_bw(base_size=8)+
+  scale_x_continuous(limits=c(50,250))
+```
+**Figure 1.** Length Frequencies with age modes (red) and total distributions (green) from the statistical estimation overlayed.
+
+
+```{rcaa,fig.height=4}
+slice  =ddply(cas,.(year), function(x) ageIt(x$len,x$n,par,timing=0.5,plusGroup=10))
+names(slice)[3]="data"
+slice=as.FLQuant(slice[,-4])
+
+ggplot(as.data.frame(slice))+
+  geom_point(aes(year,age,size=data))+
+  theme(legend.position="none")+
+  scale_size_area(max_size=8,  guide="none") +
+  xlab("Year")+ylab("Age")+
+  scale_y_continuous(breaks=seq(0,8,2))
+```
+**Figure 2.** Deterministic numbers-at-age from age slicing procedure.
+
+
+```{rcaa2,fig.height=4}
+ggplot(as.data.frame(caa))+
+  geom_point(aes(year,age,size=data))+
+  theme(legend.position="none")+
+  scale_size_area(max_size=8,  guide="none") +
+  xlab("Year")+ylab("Age")+
+  scale_y_continuous(breaks=seq(0,8,2))
+```
+**Figure 3.** Statistical estimates of numbers-at-age  from the mixture distribution analysis.
+
+
+```{r}
+dat=transform(as.data.frame(FLQuants(Statistical  =caa,
+                                     Deterministic=slice),drop=T),
+              lustrum=(year%/%5)*5,
+              yr     =year-(year%/%5)*5,
+              Method =qname,
+              data   =data/1000)[,-4]
+
+ggplot(dat)+
+  geom_bar(aes(age,weight=data,fill=Method), 
+           alpha=1, position="dodge",binwidth=1,col="grey50")+
+  facet_grid(yr~lustrum)+
+  xlab("Age")+ylab("Numbers (1000s)")+
+  scale_fill_manual(values=c("blue","red"))+
+  theme(legend.position="bottom")
+```
+**Figure 4.** A comparison of catch numbers-at-age from the statistical and deterministic ageing procedures.
+
+
+```{rsraa,fig.height=4}
+res=slice%/%apply(slice,2,sum)
+res=res%-%apply(res,1,mean)
+res=res%/%apply(res,1,sd)
+
+ggplot(as.data.frame(res))+
+  geom_point(aes(year,age,size=data,
+                 col=ifelse(data<0,"negative","positive")))+
+  theme(legend.position="none")+
+  scale_size(range=c(0,8),  guide="none") +
+  xlab("Year")+ylab("Age")+
+  scale_y_continuous(breaks=seq(0,8,2))+
+  theme_bw()+
+  scale_colour_manual(values=c("red","black"),guide="none")
+```
+**Figure 5.** Standardised residuals of the proportion of numbers-at-age from the deterministic age slicing procedure (red negative and black positive residuals).
+
+
+```{raa2,fig.height=4}
+res=caa%/%apply(caa,2,sum)
+res=res%-%apply(res,1,mean)
+res=res%/%apply(res,1,sd)
+
+ggplot(as.data.frame(res))+
+  geom_point(aes(year,age,size=data,
+                 col=ifelse(data<0,"negative","positive")))+
+  theme(legend.position="none")+
+  scale_size(range=c(0,8),  guide="none") +
+  xlab("Year")+ylab("Age")+
+  scale_y_continuous(breaks=seq(0,8,2))+
+  theme_bw()+
+  scale_colour_manual(values=c("red","black"),guide="none")
+```
+**Figure 6.** Standardised residuals for the proportion of numbers-at-age from the statistical mixture distribution analysis (red negative and black positive residuals).
+
+
+```{r}
+swom=readFLStock(paste(dirInp,"swo.idx",sep="/"),no.discards=TRUE)
+u   =readFLIndices(paste(dirInp,"swo.tun",sep="/"))
+
+xsaCtrl <-FLXSA.control(shk.n  = TRUE, shk.yrs  = 5,  rage  = 1, 
+                        shk.f  = TRUE, shk.ages = 5, fse    = 0.3,      
+                        qage   = 6,
+                        window = 100,  tsrange = 20,   tspower = 3, 
+                        vpa    = TRUE)
+
+xsaCtrl2<-FLXSA.control(shk.n  =TRUE,  shk.yrs =5,  rage   =1,     
+                        shk.f  =TRUE,  shk.ages=1,  fse    =0.5, min.nse=0.3,     
+                        qage   =6,
+                        window =100,   tsrange =20, tspower=3, 
+                        vpa    =TRUE)
+
+m.spwn(      swom)[]  =0.5
+harvest.spwn(swom)[]  =0.5
+range(swom)[c("minfbar","maxfbar")]=c(2,4)
+
+load(paste(dirDat,"/caa.RData",sep=""))
+catch.n(swom)   =caa/1000
+landings.n(swom)=caa/1000
+catch        =landings(swom)
+
+catch.wt(   swom)=waa
+landings.wt(swom)=waa
+discards.wt(swom)=waa
+stock.wt(   swom)=waa
+
+catch(swom)=catch
+
+swom=setPlusGroup(swom,5)
+stock.wt(swom)=catch.wt(swom)
+```
+
+```{rcatch,fig.height=4}
+load(paste(dirDat,"swo2009PG10.RData",sep="/"))
+
+biomass=cbind(ddply(cas,.(year), with, data.frame("CAS-Growth Curve"=sum(wt*n))),
+              "2014 Task 1" =c(landings(swom)),
+              "2014 CAA-WAA"=c(apply(waa*caa,2,sum))/1000)
+b2009=as.data.frame(FLQuants("2010"  =catch(swo2009PG10)/1000,
+                             "2010 CAA-WAA"=computeCatch(swo2009PG10)/1000))
+
+ggplot(melt(biomass,id="year"))+
+  geom_line(aes(year,value,group=variable,col=variable))+
+  geom_line(aes(year,data,group=qname,col=qname),data=b2009)+
+  scale_y_continuous(limits=c(0,25000))+
+  theme(legend.position="bottom")
+```
+**Figure 7.** Comparison of total catch biomass derived from different procedures.
+
+```{r}
+mean(landings(swom)/computeCatch(swom))
+```
+
+```{rcas2,fig.height=6}
+ggplot(ddply(cas,.(lustrum), transform, n=n/sum(n)))+
+  geom_histogram(aes(x=len,y=..density..,weight=n),binwidth=5,
+                 fill="steelblue",col="grey25")+
+  facet_grid(lustrum~.)+
+  scale_y_continuous(breaks=c(0.01))+
+  theme_bw()+
+  xlab("Length (cm)")+ylab("Density")
+```
+**Figure 8.** Catch-at-size by lustrum (5 year block).
+
+
+```{rpw}
+powh=function(len,n){
+  
+  fn=function(len,n){
+    require(plyr)
+    
+    res=ddply(data.frame(n=n,len=len), .(len), function(x) sum(x$n))
+    res=res[order(res$len),]
+    
+    csum =rev(cumsum(rev(res$V1)))
+    clsum=rev(cumsum(rev(res$len*res$V1)))
+    mn   =clsum/csum
+    
+    data.frame(mn=mn,diff=mn-res$len,len=res$len,n=res$V1)}
+  
+  linf=function(x) -coefficients(x)[1]/coefficients(x)[2]
+  zk  =function(x) (-1-coefficients(x)[2])/coefficients(x)[2]
+ 
+  dat=fn(len,n)
+  
+  res=lm(diff~len,data=dat)
+  
+  params=c("linf"=linf(res),"zk"=zk(  res))
+  names(params)=c("linf","zk")
+  
+  return(list(params=params,
+              data  =dat))}
+
+pw=ddply(subset(cas), .(year), 
+            function(cas) powh(cas$len,cas$n)$data)
+      
+pw=transform(pw, lustrum=(year%/%5)*5,
+                 yr    =year-(year%/%5)*5,
+                 weight=ifelse(len>=100&len<=200,1,0))
+
+ggplot(pw)+
+  geom_line(aes(len,diff,colour=factor(yr),group=year))+
+  scale_x_continuous(limits=c(0,300)) +
+  facet_wrap(~lustrum,ncol=2)+
+  theme(legend.position="none")+
+  xlab("Length (cm)")+
+  ylab("Difference between Length and Mean Size")+
+  geom_smooth(aes(len,diff,weight=weight),
+              method="lm",col="red",size=1.25,alpha=.1)
+```
+**Figure 9.**  Powell-Wheatherall plots
+
+
+```{rpwz,fig.height=3,length=8}
+ggplot(transform(ddply(subset(cas,len>=100&len<=200), .(year), 
+            function(cas) powh(cas$len,cas$n)$params),
+         z=zk*par["k"]))+
+  geom_point(aes(year,z))+
+  geom_line(aes(year,z))+
+  geom_smooth(aes(year,z),se=FALSE,span=.75,size=1.5)+theme_bw()
+```
+**Figure 10.** Estimates of Z derived from the Powell-Wetherall plots; showing the estimates from each year (black line with points) and a smoother (blue continuous line).
+
+
+```{r}
+ccFn=function(freq,age){
+    freq=freq/sum(freq)
+    lm  =lm(log(freq)~age)
+    hat =exp(predict(lm))
+    sel =(freq/hat)/max(freq/hat)
+    data.frame(age=age,obs=freq,hat=hat,sel=sel)}
+
+ca=ddply(cas, .(lustrum), 
+          function(x,par,plusGroup,timing)
+                 ageIt(x$len,x$n,par,timing,plusGroup), 
+                      par=par, plusGroup=10, timing=0.5)
+
+cc=ddply(subset(ca,age<10),.(lustrum),function(obj) ccFn(obj$freq,obj$age))
+
+ggplot(cc)+
+  geom_point(aes(age,log(obs)))+
+  stat_smooth(aes(age,log(obs),weight=ifelse(age%in%2:8,1,0)),
+              method="lm",se=FALSE)+
+  facet_wrap(~lustrum,ncol=2)+theme_bw()+
+  ylab(expression(log(P[a])))+xlab("Age")
+```
+**Figure 11.** Catch curves by lustrum from statisical age estimates.
+
+
+```{r}
+ggplot(cc, aes(age,sel))+
+  geom_point()+
+  geom_line(data=subset(cc,age<=5))+
+  geom_line(data=subset(cc,age>=5),linetype=3)+
+  facet_wrap(~lustrum,ncol=2)+theme_bw()+
+  ylab("Selectivity-at-Age")+xlab("Age")
+
+save(cc,file=paste(dirDat,"cc.RData",sep="/"))
+```
+**Figure 12.** Estimated selectivity by lustrum.
+
+
+##Selectivity by gear
+```{r,fig.height=5}
+ca=ddply(cas, .(gear), 
+          function(x,par,plusGroup,timing)
+                 ageIt(x$len,x$n,par,timing,plusGroup), 
+                      par=par, plusGroup=10, timing=0.5)
+
+cc=ddply(subset(ca,age<10),.(gear),function(obj) ccFn(obj$freq,obj$age))
+
+ggplot(cc,aes(age,sel))+
+  geom_point()+
+  geom_line(data=subset(cc,age<=5))+
+  geom_line(data=subset(cc,age>=5),linetype=3)+
+  facet_wrap(~gear,ncol=3)+
+  ylab("Selectivity-at-Age")+xlab("Age")+
+  scale_y_continuous(breaks=c(0,.5,1))+
+  theme_bw()
+```
+**Figure 13.** Catch curves by gear based on age estimates
+
+
+##Selectivity by gear and lustrum
+```{r,fig.height=5}
+ca=ddply(subset(cas,year>=2006), .(gear,lustrum), 
+          function(x,par,plusGroup,timing)
+                 ageIt(x$len,x$n,par,timing,plusGroup), 
+                      par=par, plusGroup=10, timing=0.5)
+
+cc=ddply(subset(ca,age<10),.(gear,lustrum),function(obj) ccFn(obj$freq,obj$age))
+
+ggplot(cc,aes(age,sel,col=factor(lustrum),group=lustrum))+
+  geom_point()+
+  geom_line(data=subset(cc,age<=5))+
+  geom_line(data=subset(cc,age>=5),linetype=3)+
+ facet_wrap(~gear,ncol=3)+
+  theme(legend.position="bottom")+
+  ylab("Selectivity-at-Age")+xlab("Age")+
+  scale_y_continuous(breaks=c(0,.5,1))
+```
+**Figure 14.** Catch curves by gear and lustrum based on statistical age estimates.
+
+
+## XSA Continuity Run
+
+```{r,fig.height=5,}
+xsa=FLXSA(swom,u,xsaCtrl)
+swom=swom+xsa
+
+units(stock.n( swom))="Thousands"
+units(stock.wt(swom))="Tonnes"
+
+#plot(swom)+
+#  facet_wrap(~qname,ncol=2,scale="free")
+
+save(swom,u,xsa,xsaCtrl,
+     file=paste(dirDat,"xsa.RData",sep="/"))
+```
+
+```{r}
+dgs=mdply(data.frame(u=names(u)), function(u,xsa)
+  model.frame(FLQuants(obs     =xsa@index[[u]]%/%xsa@q.hat[[u]],
+                       hat     =xsa@stock.n[dimnames(index(xsa)[[u]])$age,
+                                            dimnames(index(xsa)[[u]])$year],
+                       residual=index.res(xsa)[[u]]),drop=T),xsa=xsa)
+dgs=ddply(dgs,.(u,age),diags:::diagsFn)
+```
+
+```{ruhat}
+ggplot(dgs,aes(hat,residual))+
+  geom_point()+
+  geom_hline(aes(yintercept=0))+
+  facet_grid(u~age,scale="free_x")
+```
+**Figure 15.** XSA diagnostics from continuity run; residuals against fitted value.
+
+```{rursd}
+ggplot(dgs,aes(year,residual))+
+  geom_point()+
+  geom_errorbar(aes(year,ymin=0,ymax=residual))+
+  geom_smooth(span=1,se=F)+
+  facet_grid(u~age)
+```
+**Figure 16.** XSA diagnostics from continuity run; residuals against year.
+
+```{rursd2,fig.height=4}
+ggplot(subset(dgs,age==2),aes(hat,obs))+
+  geom_abline(aes(a=0,b=1))+
+  geom_point()+
+  geom_smooth(method="lm")+
+  facet_wrap(~u,ncol=3)+
+  coord_cartesian(ylim=c(0,1000))
+```
+**Figure 17.** XSA diagnostics from continuity run; Calibration regression plots for age 2 (outlier for Scilian gillnet removed).
+
+```{rursd3,fig.height=4}
+ggplot(subset(dgs,age==3),aes(hat,obs))+
+  geom_abline(aes(a=0,b=1))+
+  geom_point()+
+  geom_smooth(method="lm")+
+  facet_wrap(~u,scale="free",ncol=3)+
+  coord_cartesian(ylim=c(0,400))
+```
+**Figure 18.** XSA diagnostics from continuity run; Calibration regression plots for age 3 (outlier for Scilian gillnet removed).
+
+```{rursd4,fig.height=4}
+ggplot(subset(dgs,age==4),aes(hat,obs))+
+  geom_abline(aes(a=0,b=1))+
+  geom_point()+
+  geom_smooth(method="lm")+
+  coord_cartesian(ylim=c(0,200))+
+  facet_wrap(~u,scale="free",ncol=3)
+```
+**Figure 19.** XSA diagnostics from continuity run; Calibration regression plots for age 4 (outlier for Scilian gillnet removed).
+
+
+```{ruar,fig.height=6}
+ggplot(dgs,aes(residual,residualLag))+
+  geom_hline(aes(yintercept=0))+
+  geom_point()+
+  geom_smooth(method="lm",se=F)+
+  facet_grid(age~u,scale="free")
+```
+**Figure 20.** XSA diagnostics from continuity run; AR plots of lagged residuals
+
+```{rqq,fig.height=4}
+ggplot(dgs)                                           +
+  geom_point( aes(qqx,qqy))                            +
+  stat_smooth(aes(qqx,qqHat),method="lm",se=T,fill="blue", alpha=0.1)         +
+  facet_grid(age~u)                                    +
+  theme(legend.position="bottom")  
+```
+**Figure 21.** XSA diagnostics from continuity run; QQ plots to check for normality
+
+
+```{rWts}
+ggplot(subset(xsa@diagnostics,age>0))+
+  geom_point(aes(as.numeric(yrcls),nhat,size=0),shape=1,alpha=0)+
+   geom_point(aes(as.numeric(yrcls),nhat,fill=factor(age),size=w),shape=21,
+              data=subset(xsa@diagnostics,age>0&w>0))+
+  geom_vline(aes(xintercept=2008.5))+
+  facet_grid(source~age)+
+  theme(legend.position="none")
+```
+**Figure 22.** XSA diagnostics from continuity run; weights for terminal year Ns for each CPUE observation and shrinkage
+
+```{rsingleU,fig.height=6.5}
+stks=FLStocks(mlply(data.frame(u=names(u)), function(u,swom,idx,ctrl){
+ swom+FLXSA(swom,idx[[u]],ctrl)
+  },swom=swom,idx=u,ctrl=xsaCtrl2))
+stks[["Candidate"]]=swom
+
+plot(stks)+
+  theme(legend.position="bottom")
+```
+**Figure 23.** XSA time series estimates by CPUE series.
+
+```{rRetro}
+plot(FLStocks(mlply(data.frame(year=2009:2013), function(year,swom,u,ctrl){
+  stk=window(swom,end=year)  
+  stk+FLXSA(stk,u,ctrl)
+  },swom=swom,u=u,ctrl=xsaCtrl)))+
+  theme(legend.position="none")
+```
+**Figure 24.** Retrospective XSA time series estimates.
+
+## Alternative Run
+
+```{r,fig.height=5,}
+xsa=FLXSA(swom,u,xsaCtrl2)
+swom=swom+xsa
+candidate=swom
+
+units(stock.n( swom))="Thousands"
+units(stock.wt(swom))="Tonnes"
+
+#plot(swom)+
+#  facet_wrap(~qname,ncol=2,scale="free")
+
+save(swom,xsa,xsaCtrl2,
+     file=paste(dirDat,"xsaAlt.RData",sep="/"))
+```
+
+```{r}
+dgs=mdply(data.frame(u=index.name(xsa)), function(u,xsa)
+  model.frame(FLQuants(obs     =xsa@index[[u]]%/%xsa@q.hat[[u]],
+                       hat     =xsa@stock.n[dimnames(index(xsa)[[u]])$age,
+                                            dimnames(index(xsa)[[u]])$year],
+                       residual=index.res(xsa)[[u]]),drop=T),xsa=xsa)
+dgs=ddply(dgs,.(u,age),diags:::diagsFn)
+```
+
+```{ruhat-alt}
+ggplot(dgs,aes(hat,residual))+
+  geom_hline(aes(yintercept=0))+
+  geom_point()+
+  facet_grid(u~age,scale="free_x")
+```
+**Figure 25.** XSA diagnostics from alternative run; residuals against fitted value.
+
+```{rursd-alt}
+ggplot(dgs,aes(year,residual))+
+  geom_point()+
+  geom_errorbar(aes(year,ymin=0,ymax=residual))+
+  geom_smooth(span=1,se=F)+
+  facet_grid(u~age)
+```
+**Figure 26.** XSA diagnostics from  from alternative run; residuals against year.
+
+```{rursd2-alt,fig.height=4}
+ggplot(subset(dgs,age==2),aes(hat,obs))+
+  geom_abline(aes(a=0,b=1))+
+  geom_point()+
+  geom_smooth(method="lm")+
+  facet_wrap(~u,scale="free",ncol=3)+
+  coord_cartesian(ylim=c(0,1000))
+```
+**Figure 27.** XSA diagnostics from  from alternative run; Calibration regression plots for age 2.
+
+```{rursd3-alt,fig.height=4}
+ggplot(subset(dgs,age==3),aes(hat,obs))+
+  geom_abline(aes(a=0,b=1))+
+  geom_point()+
+  geom_smooth(method="lm")+
+  facet_wrap(~u,scale="free",ncol=3)+
+  coord_cartesian(ylim=c(0,400))
+```
+**Figure 28.** XSA diagnostics from alternative run; Calibration regression plots for age 3.
+
+```{rursd4-alt,fig.height=4}
+ggplot(subset(dgs,age==4),aes(hat,obs))+
+  geom_abline(aes(a=0,b=1))+
+  geom_point()+
+  geom_smooth(method="lm")+
+  coord_cartesian(ylim=c(0,200))+
+  facet_wrap(~u,scale="free",ncol=3)
+```
+**Figure 29.** XSA diagnostics from alternative run; Calibration regression plots for age 4.
+
+
+```{ruar-alt,fig.height=6}
+ggplot(dgs,aes(residual,residualLag))+
+  geom_hline(aes(yintercept=0))+
+  geom_point()+
+  geom_smooth(method="lm",se=F)+
+  facet_grid(age~u,scale="free")
+```
+**Figure 30.** XSA diagnostics alternative run; AR plots of lagged residuals
+
+```{rqq-alt,fig.height=4}
+ggplot(dgs)                                           +
+  geom_point( aes(qqx,qqy))                            +
+  stat_smooth(aes(qqx,qqHat),method="lm",se=T,fill="blue", alpha=0.1)         +
+  facet_grid(age~u)                                    +
+  theme(legend.position="bottom")  
+```
+**Figure 31.** XSA diagnostics alternative run; QQ plots to check for normality
+
+```{rWts-alt,figure.height=4}
+ggplot(subset(xsa@diagnostics,age>0))+
+  geom_point(aes(as.numeric(yrcls),nhat,size=0),shape=1,alpha=0)+
+   geom_point(aes(as.numeric(yrcls),nhat,fill=factor(age),size=w),shape=21,
+              data=subset(xsa@diagnostics,age>0&w>0))+
+  geom_vline(aes(xintercept=2008.5))+
+  facet_grid(source~age)+
+  theme(legend.position="none")
+```
+**Figure 32.** XSA diagnostics alternative run; weights for terminal year Ns for each CPUE observation and shrinkage
+
+```{rsingleU-alt,fig.height=6.5}
+stks=FLStocks(mlply(data.frame(u=names(u)), function(u,swom,idx,ctrl){
+ swom+FLXSA(swom,idx[[u]],ctrl)
+  },swom=swom,idx=u,ctrl=xsaCtrl2))
+stks[["Candidate"]]=swom
+
+plot(stks)+
+  theme(legend.position="bottom")
+```
+**Figure 33.** XSA time series estimates by CPUE series.
+
+```{rRetro-alt}
+plot(FLStocks(mlply(data.frame(year=2009:2013), function(year,swom,u,ctrl){
+  stk=window(swom,end=year)  
+  stk+FLXSA(stk,u,ctrl)
+  },swom=swom,u=u[c(1,6)],ctrl=xsaCtrl2)))+
+  theme(legend.position="none")
+```
+**Figure 34.** Retrospective XSA time series estimates.
+
+## Stock Status
+```{rU16}
+plot(swom)+
+  theme(legend.position="none")
+```
+**Figure 35.** XSA alternative run.
+
+## Stock Status
+```{rsr}
+sr=as.FLSR(swom,model="bevholt")
+sr=fmle(sr,control=list(trace=0),fixed=list(b=10))
+plot(sr)
+```
+**Figure 36.** Stock Recruitment Relationship
+
+```{r}
+discards.n(swom)[]=0
+swom=setPlusGroup(swom,10)
+
+landings.wt(swom)[]=apply(waa[,ac(2011:2013)],1,mean)
+discards.wt(swom)=landings.wt(swom)
+stock.wt(   swom)=landings.wt(swom)
+
+brp=FLBRP(swom,sr=sr)
+
+brp=brp(brp)
+
+save(swom,brp,sr,file=paste(dirDat,"brp.RData",sep="/"))
+
+plot(brp)+theme(legend.position="bottom")
+```
+**Figure 37a.** Equilibrium Analysis with reference points.
+
+```{r}
+plot(brp,obs=TRUE,refpts=FALSE)+theme(legend.position="bottom")
+```
+**Figure 37b.** Equilibrium Analysis with observations.
+
+
+```{r}
+library(kobe)
+kobePhase(kobe(brp,swom),xlim=c(0,2))+
+  geom_path(aes(stock,harvest,col=year))+
+  theme(legend.position="none")
+
+save(brp,swom,file=paste(dirDat,"/shiny.RData",sep=""))
+```
+**Figure 38.** Kobe Phase Plot.
+
+```{rsel}
+load(paste(dirDat,"pel.RData",sep="/"))
+
+pel=setPlusGroup(FLQuant(c(0,pel[,"sel"]),
+                         dimnames=list(age=0:9)),10)
+pel[ac(6:10)]=pel["5"]
+sel=landings.sel(brp)
+
+load(paste(dirDat,"brp.RData",sep="/"))
+ggplot(as.data.frame(FLQuants("Current"    =landings.sel(brp)/max(landings.sel(brp)),
+                              "Mesopelagic"=pel)))+
+  geom_line(aes(age,data,col=qname,group=qname))+
+  theme(legend.position="bottom")
+```
+**Figure 39.** Current and mesopelagic selection patterns.
+
+```{r}
+set.seed(9789)
+srDev=exp(FLQuant(sample(c(residuals(sr)[,ac(1985:2010)]),26*100,T),
+            ,dimnames=list(year=2014:2025,iter=1:100)))
+
+f=FLQuant(mean(c(fbar(swom)[,ac(2011:2013)])),dimnames=list(year=2014:2025))
+    
+swom.=fwdWindow(swom,end=2025,brp)
+swoms=fwd(swom.,
+          FLQuants(f=f,f=f*0.8),
+          sr=brp,
+          sr.residuals=srDev)
+    
+refPtSQ=computeRefpts(brp)[1:6,1:5]
+
+names(swoms)=c("F Status Quo","F Reduction")
+plot(swoms)+
+  facet_wrap(~qname,ncol=1,scale="free")+
+  theme(legend.position="bottom")
+```
+**Figure 40.** Projections for current selection pattern.
+
+```{r}
+selMult=0.5
+
+landings.sel(brp)=sel*selMult+pel*(1-selMult)
+refPtMP=computeRefpts(brp)[1:6,1:5]
+
+swom.=fwdWindow(swom,end=2025,brp)
+swoms=fwd(swom.,
+          FLQuants(f=f,f=f*0.8),
+          sr=brp,
+          sr.residuals=srDev)
+    
+names(swoms)=c("F Status Quo","F Reduction")
+plot(swoms)+
+    facet_wrap(~qname,ncol=1,scale="free")+
+    theme(legend.position="bottom")
+```
+**Figure 41.** Projections for 50:50 current:mesopelagic selection pattern.
+
+
+Tables
+=====================================
+
+Table 1a. XSA Control options from continuity run.
+```{r}
+xsaCtrl
+```
+
+Table 1b. XSA Control options from alternative run.
+```{r}
+xsaCtrl2
+```
+
+Table 2a. Reference Points
+```{r}
+refPtSQ[1:6,1:5]
+```
+
+Table 2b. Reference Points with 50% Mesopelagic selection pattern.
+```{r}
+refPtMP[1:6,1:5]
+```
+
+Table 3. Stock information
+```{r}
+candidate
+```
+
+Table 4a. XSA diagnostics from continuity run.
+```{r}
+diagnostics(xsa)
+```
+
+Table 4b. XSA diagnostics from alternative run.
+```{r}
+diagnostics(xsa)
+```
